@@ -1,0 +1,110 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+cbuffer Parameters
+{
+    int grid_size = 64;
+    int grid_padding = 4;
+    int grid_height = 128;
+};
+
+RWStructuredBuffer<float4> FloodFill;
+RWStructuredBuffer<int2> Occlusion;
+RWStructuredBuffer<int4> Emission;
+
+float3 GetEmission(int3 pos)
+{
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    if (pos.x < 0 || pos.y < 0 || pos.z < 0 || pos.x >= total_size || pos.y >= total_height || pos.z >= total_size)
+    {
+        return 0.0f;
+    }
+    uint idx = uint(pos.x + pos.y * total_size + pos.z * total_size * total_height);
+    float4 E = float4(Emission[idx]) / 10000.0f;
+    if (E.a > 0)
+    {
+        return (E.xyz / E.a) * 4;
+    }
+    else
+    {
+        return 0;
+    }
+
+}
+
+float GetOcclusion(int3 pos)
+{
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    if (pos.x < 0 || pos.y < 0 || pos.z < 0 || pos.x >= total_size || pos.y >= total_height || pos.z >= total_size)
+    {
+        return 1.0f;
+    }
+    uint idx = uint(pos.x + pos.y * total_size + pos.z * total_size * total_height);
+    
+    float2 O = float2(Occlusion[idx]) / 10000.0f;
+    if (O.y > 0)
+    {
+        return 1.0f - (O.x / O.y);
+    }
+    else
+    {
+        return 1.0f;
+    }
+}
+
+float4 GetLight(int3 pos)
+{
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    if (pos.x < 0 || pos.y < 0 || pos.z < 0 || pos.x >= total_size || pos.y >= total_height || pos.z >= total_size)
+    {
+        if (pos.y >= total_height)
+        {
+            return float4(0, 0, 0, 1);
+        }
+        else
+        {
+            return float4(0, 0, 0, 0);
+        }
+
+    }
+    uint idx = uint(pos.x + pos.y * total_size + pos.z * total_size * total_height);
+    
+    return FloodFill[idx] * GetOcclusion(pos);
+}
+
+[numthreads(4,4,4)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    int3 pos = int3(id);
+    
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    uint idx = uint(id.x + id.y * total_size + id.z * total_size * total_height);
+    
+    
+    float fade = 0.99f;
+    float4 decrease = 0.85f;
+    
+    float4 self = FloodFill[idx] * fade;
+    self.xyz = max(self.xyz, GetEmission(pos));
+    
+    float4 up = GetLight(pos + int3(0, 1, 0));
+    
+    if (up.a > 0.99f)
+    {
+        self.a = max(self.a, up.a);
+    }
+    self = max(self, up * decrease);
+    self = max(self, GetLight(pos + int3(-1, 0, 0)) * decrease);
+    self = max(self, GetLight(pos + int3(1, 0, 0)) * decrease);
+    self = max(self, GetLight(pos + int3(0, 0, -1)) * decrease);
+    self = max(self, GetLight(pos + int3(0, 0, 1)) * decrease);
+    self = max(self, GetLight(pos + int3(0, -1, 0)) * decrease);
+    
+    FloodFill[idx] = self;
+}

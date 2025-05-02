@@ -1,0 +1,196 @@
+#pragma kernel CSMain
+
+struct Particle
+{
+    float3 x;
+    float mass;
+    float3 v;
+    float volume_0;
+    float3x3 C;
+    float3 p1; // x = type, y = stiffness
+    float3x3 F;
+    float3 p2;
+    float4 color;
+};
+
+
+struct GridCell
+{
+    int v_x;
+    int v_y;
+    int v_z;
+    int mass;
+};
+
+RWStructuredBuffer<Particle> Particles;
+RWStructuredBuffer<uint> Removed;
+RWStructuredBuffer<GridCell> Grid;
+
+cbuffer Parameters
+{
+    uint NumParticles;
+    uint Start;
+    uint End;
+    
+    int grid_size;
+    int grid_padding;
+    int total_height;
+    int grid_height;
+}
+
+float3x3 inverse(float3x3 m)
+{
+    float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2];
+    float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2];
+    float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2];
+
+    float b01 = a22 * a11 - a12 * a21;
+    float b11 = -a22 * a10 + a12 * a20;
+    float b21 = a21 * a10 - a11 * a20;
+
+    float det = a00 * b01 + a01 * b11 + a02 * b21;
+
+    // Prevent division by zero
+    if (abs(det) < 1e-6)
+        return float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0); // Or handle error another way
+
+    float invDet = 1.0 / det;
+
+    float3x3 inverse;
+
+    inverse[0][0] = (a11 * a22 - a12 * a21) * invDet;
+    inverse[0][1] = -(a01 * a22 - a02 * a21) * invDet;
+    inverse[0][2] = (a01 * a12 - a02 * a11) * invDet;
+
+    inverse[1][0] = -(a10 * a22 - a12 * a20) * invDet;
+    inverse[1][1] = (a00 * a22 - a02 * a20) * invDet;
+    inverse[1][2] = -(a00 * a12 - a02 * a10) * invDet;
+
+    inverse[2][0] = (a10 * a21 - a11 * a20) * invDet;
+    inverse[2][1] = -(a00 * a21 - a01 * a20) * invDet;
+    inverse[2][2] = (a00 * a11 - a01 * a10) * invDet;
+
+    return inverse;
+}
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+
+    
+    const float dt = 0.025f;
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    const float rest_density = 1.0f;
+    const float dynamic_viscosity = 0.3f;
+    const float eos_stiffness = 10.0f;
+    const float eos_power = 4;
+    
+    uint idx = id.x + Start;
+    if (idx >= NumParticles || idx >= End)
+    {
+        return;
+    }
+    if (Removed[idx] > 0)
+    {
+        return;
+    }
+    float3 weights[3];
+    
+    Particle p = Particles[idx];
+    
+    float elastic_lambda = 10.0f;// / p.p1.y;
+    float elastic_mu = 20.0f * p.p1.y;
+    
+    float3x3 stress = 0;
+    float3x3 eq_16_term_0 = 0;
+    
+    float3 cell_idx = floor(p.x);
+    float3 cell_diff = (p.x - cell_idx) - 0.5f;
+    weights[0] = 0.5f * pow(0.5f - cell_diff, 2);
+    weights[1] = 0.75f - pow(cell_diff, 2);
+    weights[2] = 0.5f * pow(0.5f + cell_diff, 2);
+    
+    if (p.p1.x == 1) // fluid!
+    {
+        float density = 0.0f;
+        for (uint gx = 0; gx < 3; gx++)
+        {
+            for (uint gy = 0; gy < 3; gy++)
+            {
+                for (uint gz = 0; gz < 3; gz++)
+                {
+                    float weight = weights[gx].x * weights[gy].y * weights[gz].z;
+                
+                    uint3 cell_x = uint3(cell_idx.x + gx - 1, cell_idx.y + gy - 1, cell_idx.z + gz - 1);
+                    
+                    uint cell_idx = cell_x.x + cell_x.y * total_size + cell_x.z * total_size * total_height;
+                    
+                    density += (float(Grid[cell_idx].mass) / 10000.0f) * weight;
+                }
+            }
+        }
+        float volume = p.mass / density;
+        
+        float pressure = max(-0.1f, eos_stiffness * (pow(density / rest_density, eos_power) - 1));
+        
+        float3x3 stress = float3x3(-pressure, 0, 0, 0, -pressure, 0, 0, 0, -pressure);
+        
+        /*
+        Mat3x3_8 viscosity_term = (C + Transpose(C)) * dynamic_viscosity;
+		stress = stress + viscosity_term;
+        */
+        float3x3 viscosity_term = (p.C + transpose(p.C)) * dynamic_viscosity;
+        stress = stress + viscosity_term;
+        
+        eq_16_term_0 = stress * (-volume * 1) * dt;
+
+    }
+    else // not a fluid!
+    {
+        float3x3 F = Particles[idx].F;
+        float J = determinant(F);
+    
+        float volume = Particles[idx].volume_0 * J;
+
+        float3x3 F_T = transpose(F);
+        float3x3 F_inv_T = inverse(F_T);
+        float3x3 F_minus_F_inv_T = F - F_inv_T;
+    
+        float3x3 P_term_0 = elastic_mu * (F_minus_F_inv_T);
+        float3x3 P_term_1 = elastic_lambda * log(J) * F_inv_T;
+        float3x3 P = P_term_0 + P_term_1;
+        stress = (1.0f / J) * mul(P, F_T);
+        eq_16_term_0 = -volume * 1 * stress * dt;
+    }
+    
+    
+
+    for (uint gx = 0; gx < 3; gx++)
+    {
+        for (uint gy = 0; gy < 3; gy++)
+        {
+            for (uint gz = 0; gz < 3; gz++)
+            {
+                float weight = weights[gx].x * weights[gy].y * weights[gz].z;
+                
+                uint3 cell_x = uint3(cell_idx.x + gx - 1, cell_idx.y + gy - 1, cell_idx.z + gz - 1);
+                float3 cell_dist = (cell_x - p.x) + 0.5f;
+                
+                uint cell_idx = cell_x.x + cell_x.y * total_size + cell_x.z * total_size * total_height;
+                
+                float3 g_v = float3(0, 0, 0);
+                
+                float3 momentum = mul(eq_16_term_0 * weight, cell_dist);
+                g_v += momentum;
+                
+                InterlockedAdd(Grid[cell_idx].v_x, int(g_v.x * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_y, int(g_v.y * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_z, int(g_v.z * 10000.0f));
+            }
+
+        }
+
+    }
+}

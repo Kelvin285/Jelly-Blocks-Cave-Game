@@ -1,0 +1,71 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+struct Particle
+{
+    float3 x;
+    float mass;
+    float3 v;
+    float volume_0;
+    float3x3 C;
+    float3 padding;
+    float3x3 F;
+    float3 padding2;
+    float4 color;
+};
+
+struct AddingParticle
+{
+    float3 x;
+    float stiffness;
+    float3 v;
+    float type;
+    float4 color;
+    float4 emission;
+    float mass;
+    uint ID;
+    float2 padding;
+};
+
+RWStructuredBuffer<Particle> Particles;
+RWStructuredBuffer<uint> Removed;
+
+
+StructuredBuffer<AddingParticle> AddingParticles;
+
+cbuffer Parameters
+{
+    int NumAdding;
+}
+
+[numthreads(64,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= uint(NumAdding))
+    {
+        return;
+    }
+    
+    AddingParticle a = AddingParticles[id.x];
+    uint idx = a.ID;
+    
+    Particles[idx].x = a.x;
+    Particles[idx].mass = a.mass;
+    Particles[idx].v = a.v;
+    Particles[idx].volume_0 = 0;
+    Particles[idx].C = 0;
+    Particles[idx].F = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+    Particles[idx].color = a.color;
+    Particles[idx].padding.x = a.type;
+    Particles[idx].padding.y = a.stiffness;
+    
+    uint R = uint(a.emission.x * 255) & 255;
+    uint G = uint(a.emission.y * 255) & 255;
+    uint B = uint(a.emission.z * 255) & 255;
+    uint A = uint(a.emission.w * 255) & 255;
+
+    uint RGBA = R | (G << 8) | (B << 16) | (A << 24);
+    Particles[idx].padding.z = asfloat(RGBA);
+    Removed[idx] = 0;
+
+}

@@ -1,0 +1,37 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+
+struct GridCell
+{
+    int v_x;
+    int v_y;
+    int v_z;
+    int mass;
+};
+RWStructuredBuffer<GridCell> Grid;
+RWStructuredBuffer<int2> Occlusion;
+RWStructuredBuffer<int4> Emission;
+
+cbuffer Parameters
+{
+    
+    int grid_size = 64;
+    int grid_padding = 4;
+    int grid_height = 128;
+};
+
+[numthreads(4,4,4)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    uint idx = id.x + id.y * total_size + id.z * total_size * total_height;
+    Grid[idx].v_x = 0;
+    Grid[idx].v_y = 0;
+    Grid[idx].v_z = 0;
+    Grid[idx].mass = 0;
+    Occlusion[idx] = 0;
+    Emission[idx] = 0;
+}

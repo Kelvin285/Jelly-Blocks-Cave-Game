@@ -1,0 +1,63 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+cbuffer Parameters
+{
+    int grid_size = 64;
+    int grid_padding = 4;
+    int grid_height = 128;
+};
+
+struct GridCell
+{
+    int v_x;
+    int v_y;
+    int v_z;
+    int mass;
+};
+
+RWStructuredBuffer<GridCell> Grid;
+
+[numthreads(4,4,4)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+
+    const float dt = 0.025f;
+    const float gravity = -0.2f;
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    uint idx = id.x + id.y * total_size + id.z * total_size * total_height;
+    GridCell cell = Grid[idx];
+    
+    if (cell.mass > 0)
+    {
+        float3 g_v = float3(cell.v_x, cell.v_y, cell.v_z) / 10000.0f;
+        
+        g_v /= float(cell.mass) / 10000.0f;
+        g_v += dt * float3(0, gravity, 0);
+        
+        if (id.x < 2 || id.x > total_size - 3)
+        {
+            g_v.x = 0;
+        }
+        
+        if (id.y < 2 || id.y > total_height - 3)
+        {
+            g_v.y = 0;
+        }
+        
+        if (id.z < 2 || id.z > total_size - 3)
+        {
+            g_v.z = 0;
+        }
+        
+        cell.v_x = int(g_v.x * 10000.0f);
+        cell.v_y = int(g_v.y * 10000.0f);
+        cell.v_z = int(g_v.z * 10000.0f);
+        
+        
+        Grid[idx] = cell;
+    }
+
+}

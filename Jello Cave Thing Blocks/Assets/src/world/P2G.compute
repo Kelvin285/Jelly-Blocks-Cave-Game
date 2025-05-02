@@ -1,0 +1,157 @@
+#pragma kernel CSMain
+
+struct Particle
+{
+    float3 x;
+    float mass;
+    float3 v;
+    float volume_0;
+    float3x3 C;
+    float3 p1; // x = type
+    float3x3 F;
+    float3 p2;
+    float4 color;
+};
+
+
+struct GridCell
+{
+    int v_x;
+    int v_y;
+    int v_z;
+    int mass;
+};
+
+RWStructuredBuffer<Particle> Particles;
+RWStructuredBuffer<uint> Removed;
+RWStructuredBuffer<GridCell> Grid;
+RWStructuredBuffer<int2> Occlusion;
+RWStructuredBuffer<int4> Emission;
+
+cbuffer Parameters
+{
+    uint NumParticles;
+    uint Start;
+    uint End;
+    
+    int grid_size;
+    int grid_padding;
+    int grid_height;
+}
+
+float3x3 inverse(float3x3 m)
+{
+    float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2];
+    float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2];
+    float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2];
+
+    float b01 = a22 * a11 - a12 * a21;
+    float b11 = -a22 * a10 + a12 * a20;
+    float b21 = a21 * a10 - a11 * a20;
+
+    float det = a00 * b01 + a01 * b11 + a02 * b21;
+
+    // Prevent division by zero
+    if (abs(det) < 1e-6)
+        return float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0); // Or handle error another way
+
+    float invDet = 1.0 / det;
+
+    float3x3 inverse;
+
+    inverse[0][0] = (a11 * a22 - a12 * a21) * invDet;
+    inverse[0][1] = -(a01 * a22 - a02 * a21) * invDet;
+    inverse[0][2] = (a01 * a12 - a02 * a11) * invDet;
+
+    inverse[1][0] = -(a10 * a22 - a12 * a20) * invDet;
+    inverse[1][1] = (a00 * a22 - a02 * a20) * invDet;
+    inverse[1][2] = -(a00 * a12 - a02 * a10) * invDet;
+
+    inverse[2][0] = (a10 * a21 - a11 * a20) * invDet;
+    inverse[2][1] = -(a00 * a21 - a01 * a20) * invDet;
+    inverse[2][2] = (a00 * a11 - a01 * a10) * invDet;
+
+    return inverse;
+}
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    uint idx = id.x + Start;
+    if (idx >= NumParticles || idx >= End)
+    {
+        return;
+    }
+    if (Removed[idx] > 0)
+    {
+        return;
+    }
+    float3 weights[3];
+    
+    Particle p = Particles[idx];
+    
+    float3 cell_idx = floor(p.x);
+    float3 cell_diff = (p.x - cell_idx) - 0.5f;
+    weights[0] = 0.5f * pow(0.5f - cell_diff, 2);
+    weights[1] = 0.75f - pow(cell_diff, 2);
+    weights[2] = 0.5f * pow(0.5f + cell_diff, 2);
+
+    float4 emission = 0;
+    if (p.p1.z != 0)
+    {
+        int RGBA = asuint(p.p1.z);
+        float A = float((RGBA >> 24) & 255) / 255.0f;
+        float R = float(RGBA & 255) / 255.0f;
+        float G = float((RGBA >> 8) & 255) / 255.0f;
+        float B = float((RGBA >> 16) & 255) / 255.0f;
+        
+        emission = float4(float3(R, G, B) * A, A);
+        
+    }
+    
+    for (uint gx = 0; gx < 3; gx++)
+    {
+        for (uint gy = 0; gy < 3; gy++)
+        {
+            for (uint gz = 0; gz < 3; gz++)
+            {
+                float weight = weights[gx].x * weights[gy].y * weights[gz].z;
+                
+                uint3 cell_x = uint3(cell_idx.x + gx - 1, cell_idx.y + gy - 1, cell_idx.z + gz - 1);
+                float3 cell_dist = (cell_x - p.x) + 0.5f;
+                float3 Q = mul(p.C, cell_dist);
+                
+                uint cell_idx = cell_x.x + cell_x.y * total_size + cell_x.z * total_size * total_height;
+                
+                float weighted_mass = weight * p.mass;
+                
+                
+                float3 g_v = float3(0, 0, 0);
+                
+                g_v += weighted_mass * (p.v + Q);
+                
+                InterlockedAdd(Grid[cell_idx].mass, int(weighted_mass * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_x, int(g_v.x * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_y, int(g_v.y * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_z, int(g_v.z * 10000.0f));
+                
+                InterlockedAdd(Occlusion[cell_idx].x, int(p.color.w * 10000 * weight * (1.0f - emission.a)));
+                InterlockedAdd(Occlusion[cell_idx].y, int(10000 * lerp(weight, 1.0f, 0.5f)));
+                
+                if (emission.a > 0)
+                {
+                    InterlockedAdd(Emission[cell_idx].x, int(emission.r * 10000.0f * weight));
+                    InterlockedAdd(Emission[cell_idx].y, int(emission.g * 10000.0f * weight));
+                    InterlockedAdd(Emission[cell_idx].z, int(emission.b * 10000.0f * weight));
+                    InterlockedAdd(Emission[cell_idx].w, int(10000.0f * weight));
+                }
+
+            }
+
+        }
+
+    }
+}

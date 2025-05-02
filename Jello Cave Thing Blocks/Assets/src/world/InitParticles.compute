@@ -1,0 +1,83 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+struct Particle
+{
+    float3 x;
+    float mass;
+    float3 v;
+    float volume_0;
+    float3x3 C;
+    float3 p1;
+    float3x3 F;
+    float3 p2;
+    float4 color;
+};
+
+
+struct GridCell
+{
+    int v_x;
+    int v_y;
+    int v_z;
+    int mass;
+};
+
+RWStructuredBuffer<Particle> Particles;
+RWStructuredBuffer<GridCell> Grid;
+
+cbuffer Parameters
+{
+    uint NumParticles;
+    uint Start;
+    uint End;
+    int grid_size;
+    int grid_padding;
+    int grid_height;
+}
+
+
+
+[numthreads(64,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    uint idx = id.x;
+    if (idx >= NumParticles)
+    {
+        return;
+    }
+    float3 weights[3];
+    
+    Particle p = Particles[idx];
+    
+    float3 cell_idx = floor(p.x);
+    float3 cell_diff = (p.x - cell_idx) - 0.5f;
+    weights[0] = 0.5f * pow(0.5f - cell_diff, 2);
+    weights[1] = 0.75f - pow(cell_diff, 2);
+    weights[2] = 0.5f * pow(0.5f + cell_diff, 2);
+
+    float density = 0.0f;
+    
+    for (uint gx = 0; gx < 3; gx++)
+    {
+        for (uint gy = 0; gy < 3; gy++)
+        {
+            for (uint gz = 0; gz < 3; gz++)
+            {
+                float weight = weights[gx].x * weights[gy].y * weights[gz].z;
+                
+                uint3 cell_x = uint3(cell_idx.x + gx - 1, cell_idx.y + gy - 1, cell_idx.z + gz - 1);
+                uint idx = cell_x.x + cell_x.y * total_size + cell_x.z * total_size * total_height;
+                density += (float(Grid[idx].mass) / 10000.0f) * weight;
+            }
+        }
+    }
+    
+    float volume = p.mass / density;
+    
+    Particles[idx].volume_0 = volume;
+}

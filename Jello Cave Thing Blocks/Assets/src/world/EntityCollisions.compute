@@ -1,0 +1,293 @@
+#pragma kernel CSMain
+
+struct Particle
+{
+    float3 x;
+    float mass;
+    float3 v;
+    float volume_0;
+    float3x3 C;
+    float3 p1;
+    float3x3 F;
+    float3 p2;
+    float4 color;
+};
+
+struct EntityCollisionTest
+{
+    float4 pos;
+    float2 padding;
+    float width;
+    float height;
+};
+
+struct EntityCollisionResult
+{
+    int up, down, left, right, front, back, water, step_up;
+};
+
+struct Raycast
+{
+    float4 origin;
+    float4 direction;
+};
+
+struct RaycastResult
+{
+    int distance;
+    int ID;
+};
+
+RWStructuredBuffer<Particle> Particles;
+RWStructuredBuffer<uint> Removed;
+RWStructuredBuffer<EntityCollisionTest> Tests;
+RWStructuredBuffer<EntityCollisionResult> Results;
+RWStructuredBuffer<Raycast> Raycasts;
+RWStructuredBuffer<RaycastResult> RaycastResults;
+
+static float2 IntersectRayWithBox(float3 p0, float3 p1, float3 rayOrigin, float3 invRayDir)
+{
+    float3 t0 = invRayDir * (p0 - rayOrigin);
+    float3 t1 = invRayDir * (p1 - rayOrigin);
+    float3 tmin = min(t0, t1);
+    float3 tmax = max(t0, t1);
+
+    return float2(max(tmin.x, max(tmin.y, tmin.z)), min(tmax.x, min(tmax.y, tmax.z)));
+}
+
+
+cbuffer Parameters
+{
+    uint NumParticles;
+    int NumEntities;
+    int NumRaycasts;
+}
+
+float3x3 inverse(float3x3 m)
+{
+    float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2];
+    float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2];
+    float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2];
+
+    float b01 = a22 * a11 - a12 * a21;
+    float b11 = -a22 * a10 + a12 * a20;
+    float b21 = a21 * a10 - a11 * a20;
+
+    float det = a00 * b01 + a01 * b11 + a02 * b21;
+
+    // Prevent division by zero
+    if (abs(det) < 1e-6)
+        return float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0); // Or handle error another way
+
+    float invDet = 1.0 / det;
+
+    float3x3 inverse;
+
+    inverse[0][0] = (a11 * a22 - a12 * a21) * invDet;
+    inverse[0][1] = -(a01 * a22 - a02 * a21) * invDet;
+    inverse[0][2] = (a01 * a12 - a02 * a11) * invDet;
+
+    inverse[1][0] = -(a10 * a22 - a12 * a20) * invDet;
+    inverse[1][1] = (a00 * a22 - a02 * a20) * invDet;
+    inverse[1][2] = -(a00 * a12 - a02 * a10) * invDet;
+
+    inverse[2][0] = (a10 * a21 - a11 * a20) * invDet;
+    inverse[2][1] = -(a00 * a21 - a01 * a20) * invDet;
+    inverse[2][2] = (a00 * a11 - a01 * a10) * invDet;
+
+    return inverse;
+}
+
+float3x3 PolarDecomposition(float3x3 F)
+{
+    float3x3 R = F;
+    
+    for (int i = 0; i < 5; ++i)
+    {
+        float3x3 R_T = transpose(R);
+        float3x3 R_invT = 0.5f * (3.0f * R - mul(R, mul(R_T, R)));
+        R = R_invT;
+    }
+
+    return inverse(R); // Rotation matrix
+}
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= NumParticles)
+    {
+        return;
+    }
+    if (Removed[idx] > 0)
+    {
+        return;
+    }
+    
+    Particle p = Particles[idx];
+    
+    float3x3 rot = 0;
+    float3x3 rot_inv = 0;
+
+    bool water = false;
+    if (p.p1.x == 0)
+    {
+        rot = PolarDecomposition(p.F);
+        rot_inv = inverse(rot);
+    }
+    else
+    {
+        water = true;
+    }
+    
+    float3 p_pos = p.x;
+    
+    for (int r_i = 0; r_i < NumRaycasts; r_i++)
+    {
+        Raycast cast = Raycasts[r_i];
+        
+        float3 origin = cast.origin.xyz;
+        float3 dir = cast.direction.xyz;
+        
+        float3 local_origin = mul(rot_inv, origin - p_pos);
+        float3 dir_pos = mul(rot_inv, (origin + dir) - p_pos);
+        
+        float3 local_dir = normalize(dir_pos - local_origin);
+        
+        local_dir = dir;
+        local_origin = origin - p_pos;
+        
+        if (local_dir.x == 0)
+        {
+            local_dir.x = 0.001f;
+        }
+        
+        if (local_dir.y == 0)
+        {
+            local_dir.y = 0.001f;
+        }
+        
+        if (local_dir.z == 0)
+        {
+            local_dir.z = 0.001f;
+        }
+
+        float3 inv_dir = 1.0f / local_dir;
+        
+        float2 hit = IntersectRayWithBox(-0.5f, 0.5f, local_origin, inv_dir);
+        
+        if (hit.x < hit.y && hit.y > 0)
+        {
+            int newDistance = int(hit.x * 10000);
+            
+            InterlockedMin(RaycastResults[r_i].distance, newDistance);
+            
+            GroupMemoryBarrierWithGroupSync();
+            
+            if (newDistance == RaycastResults[r_i].distance)
+            {
+                RaycastResults[r_i].ID = int(id.x);
+            }
+
+        }
+
+    }
+    
+    
+    for (int i = 0; i < NumEntities; i++)
+    {
+        EntityCollisionTest test = Tests[i];
+        
+        if (distance(p_pos, test.pos.xyz + float3(0, test.height * 0.5f, 0)) > max(test.width, test.height))
+        {
+            continue;
+        }
+        
+        float3 pos = test.pos.xyz - float3(test.width * 0.5f, 0, test.width * 0.5f);
+
+        float3 clamped = clamp(pos, p_pos - 0.5f, p_pos + 0.5f) - pos;
+        float3 clamped2 = clamp(pos + float3(0, test.height, 0), p_pos - 0.5f, p_pos + 0.5f) - pos;
+        
+        
+        if (water)
+        {
+            if (clamped.x >= 0 && clamped.y >= 0.0f && clamped.z >= 0 && clamped.x <= test.width && clamped.y <= test.height && clamped.z <= test.width)
+            {
+                Results[i].water = 1;
+            }
+            continue;
+        }
+        
+        
+        if (clamped.x >= -0.2f && clamped2.y >= -0.2f && clamped.z >= -0.2f && clamped.x <= test.width + 0.2f && clamped2.y <= test.height + 0.2f && clamped.z <= test.width + 0.2f)
+        {
+            if (clamped2.y < 0.5f)
+            {
+                InterlockedMax(Results[i].step_up, int(clamped2.y * 10000.0f));
+            }
+        }
+
+        if (clamped.x >= 0 && clamped.y >= -0.1f && clamped.z >= 0 && clamped.x <= test.width && clamped.y <= 0.1f && clamped.z <= test.width)
+        {
+            int vel_y = int(p.v.y * 10000.0f);
+            if (vel_y < 0)
+            {
+                vel_y = 0;
+            }
+            InterlockedMax(Results[i].down, vel_y + 1);
+        }
+        
+        if (clamped.x >= 0 && clamped.y >= test.height - 0.1f && clamped.z >= 0 && clamped.x <= test.width && clamped.y <= test.height + 0.1f && clamped.z <= test.width)
+        {
+            int vel_y = -int(p.v.y * 10000.0f);
+            if (vel_y < 0)
+            {
+                vel_y = 0;
+            }
+            InterlockedMax(Results[i].up, vel_y + 1);
+        }
+        
+        if (clamped.x >= -0.1f && clamped2.y >= 0.5f && clamped.z >= 0.0f && clamped.x <= 0.1f && clamped.y <= test.height && clamped.z <= test.width)
+        {
+            float o = (pos.x - test.width * 0.5f) - (p_pos.x + 0.5f);
+            int vel = int((p.v.x + o) * 10000.0f);
+            if (vel < 0)
+            {
+                vel = 0;
+            }
+            InterlockedMax(Results[i].left, vel + 1);
+        }
+        
+        if (clamped.x >= test.width - 0.1f && clamped2.y >= 0.5f && clamped.z >= 0.0f && clamped.x <= test.width + 0.1f && clamped.y <= test.height && clamped.z <= test.width)
+        {
+            int vel = -int(p.v.x * 10000.0f);
+            if (vel < 0)
+            {
+                vel = 0;
+            }
+            InterlockedMax(Results[i].right, vel + 1);
+        }
+        
+        if (clamped.x >= 0.0f && clamped2.y >= 0.5f && clamped.z >= -0.1f && clamped.x <= test.width && clamped.y <= test.height && clamped.z <= 0.1f)
+        {
+            int vel = int(p.v.z * 10000.0f);
+            if (vel < 0)
+            {
+                vel = 0;
+            }
+            InterlockedMax(Results[i].front, vel + 1);
+        }
+
+        if (clamped.x >= 0.0f && clamped2.y >= 0.5f && clamped.z >= test.width - 0.1f && clamped.x <= test.width && clamped.y <= test.height && clamped.z <= test.width + 0.1f)
+        {
+            int vel = -int(p.v.z * 10000.0f);
+            if (vel < 0)
+            {
+                vel = 0;
+            }
+            InterlockedMax(Results[i].back, vel + 1);
+        }
+    }
+
+}

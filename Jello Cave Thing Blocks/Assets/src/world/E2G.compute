@@ -1,0 +1,89 @@
+#pragma kernel CSMain
+
+struct Entity
+{
+    float3 x;
+    float mass;
+    float3 v;
+    float padding;
+};
+
+
+struct GridCell
+{
+    int v_x;
+    int v_y;
+    int v_z;
+    int mass;
+};
+
+RWStructuredBuffer<Entity> Entities;
+RWStructuredBuffer<GridCell> Grid;
+
+cbuffer Parameters
+{
+    uint NumEntities;
+    
+    int grid_size;
+    int grid_padding;
+    int grid_height;
+    float fixed_delta;
+}
+
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    int total_size = grid_size + grid_padding;
+    int total_height = grid_height + grid_padding;
+    
+    uint idx = id.x;
+    if (idx >= NumEntities)
+    {
+        return;
+    }
+    float3 weights[3];
+    
+    Entity p = Entities[idx];
+    
+    float3 cell_idx = floor(p.x);
+    float3 cell_diff = (p.x - cell_idx) - 0.5f;
+    weights[0] = 0.5f * pow(0.5f - cell_diff, 2);
+    weights[1] = 0.75f - pow(cell_diff, 2);
+    weights[2] = 0.5f * pow(0.5f + cell_diff, 2);
+
+    for (uint gx = 0; gx < 3; gx++)
+    {
+        for (uint gy = 0; gy < 3; gy++)
+        {
+            for (uint gz = 0; gz < 3; gz++)
+            {
+                float weight = weights[gx].x * weights[gy].y * weights[gz].z;
+                
+                uint3 cell_x = uint3(cell_idx.x + gx - 1, cell_idx.y + gy - 1, cell_idx.z + gz - 1);
+                float3 cell_dist = (cell_x - p.x) + 0.5f;
+                
+                uint cell_idx = cell_x.x + cell_x.y * total_size + cell_x.z * total_size * total_height;
+                
+                if (cell_idx < 0 || cell_idx >= total_size * total_size * total_height)
+                {
+                    continue;
+                }
+                
+                float weighted_mass = weight * p.mass * fixed_delta;
+                
+                
+                float3 g_v = float3(0, 0, 0);
+                
+                g_v += weighted_mass * p.v;
+                
+                InterlockedAdd(Grid[cell_idx].mass, int(weighted_mass * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_x, int(g_v.x * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_y, int(g_v.y * 10000.0f));
+                InterlockedAdd(Grid[cell_idx].v_z, int(g_v.z * 10000.0f));
+            }
+
+        }
+
+    }
+}
