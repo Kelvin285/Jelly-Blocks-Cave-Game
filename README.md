@@ -1,8 +1,8 @@
 Experimental project using a GPU-Based MLS/MPM simulation
 The goal of the project was to see if I could create a playable game using a GPU-based particle simulation
 The physics in the game are simple AABB collisions aside from the particle simulation.  You can place and break blocks similarly to Minecraft.
-W, A, S, and D to move
-Left-Click to break blocks
+W, A, S, and D to move,
+Left-Click to break blocks,
 Right-Click to place blocks
 
 Current Features:
